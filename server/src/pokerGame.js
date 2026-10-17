@@ -165,12 +165,12 @@ function beginHand(players, dealerIndex) {
   return game;
 }
 
-export function createGame(wallets) {
-  if (!Array.isArray(wallets)) throw new Error("La lista de jugadores no es válida.");
-  return beginHand(wallets.map((wallet) => ({
-    wallet,
-    stack: STARTING_STACK
-  })), 0);
+export function createGame(players) {
+  if (!Array.isArray(players)) throw new Error("La lista de jugadores no es válida.");
+  return beginHand(players.map((player) => typeof player === "string"
+    ? { wallet: player, stack: STARTING_STACK }
+    : { wallet: player.wallet, stack: player.stack }
+  ), 0);
 }
 
 function finishHand(game, winners) {

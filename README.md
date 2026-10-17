@@ -4,14 +4,14 @@ Prototipo de póker híbrido para dos a cuatro jugadores: React + ethers.js, ser
 
 ## Alcance actual
 
-- Contrato con buy-in fijo y selección de mesa para 2, 3 o 4 jugadores; la primera entrada fija la capacidad y la liquidación requiere completar esos asientos.
+- Contrato con buy-in fijo de `0.01 MON`, mesa de 2 a 4 jugadores y retiros individuales después del cierre.
 - Interfaz React para conectar MetaMask, elegir nombre de jugador, entrar a una sala y enviar el buy-in.
 - Servidor Socket.IO con partidas locales de Texas Hold'em configurables para dos, tres o cuatro jugadores: turnos, rondas de apuestas, manos privadas y evaluación del ganador.
 - Pruebas de contrato con Hardhat.
 
 ## Importante: no es apto para dinero real
 
-La partida del servidor es una simulación local: cada jugador comienza con 1000 fichas, las ciegas son 10/20 y las cartas se reparten con aleatoriedad del servidor, no verificable por blockchain. Las fichas no representan MON ni están sincronizadas con el contrato. El contrato `settle(winner)` acepta el ganador indicado por quien llama y no garantiza que el resultado sea correcto. No conectes fondos reales ni despliegues en mainnet. Antes de producción hacen falta auditoría, aleatoriedad verificable, resolución de disputas, protección contra desconexiones y revisión legal.
+La partida y sus fichas se calculan en el servidor, no en blockchain. Al cerrar la partida, el owner del contrato confirma los saldos finales; el contrato reserva el 15% del escrow para ese owner y asigna el 85% restante proporcionalmente a las fichas finales. Cada participante reclama su pago en su propia wallet de Monad. Esta versión confía en el owner para reportar el resultado y no debe usarse con fondos reales ni desplegarse en mainnet. Antes de producción hacen falta auditoría independiente, verificación descentralizada de resultados, protección contra desconexiones, persistencia y revisión legal.
 
 ### Condiciones de victoria
 
@@ -43,37 +43,34 @@ En Windows PowerShell, si `cp` no funciona:
 Copy-Item .env.example .env
 ```
 
-## Ejecutar contrato local
+## Desplegar en Monad Testnet
+
+La red oficial de prueba de Monad usa Chain ID `10143`, símbolo `MON` y RPC `https://testnet-rpc.monad.xyz`. Consulta también la [documentación oficial de red](https://docs.monad.xyz/developer-essentials/testnet).
 
 Terminal 1:
 
 ```bash
-npm run node
+npm.cmd run compile
+npm.cmd test
 ```
 
-Terminal 2:
+Crea `.env` en la raíz copiando `.env.example`, y configura `MONAD_PRIVATE_KEY` con una cuenta dedicada de Monad Testnet que tenga MON de prueba. Solicita fondos solo en el faucet oficial de [Monad](https://faucet.monad.xyz). **Nunca uses una clave con fondos reales ni compartas o subas `.env`.**
 
-```bash
-npm run compile
-npm test
-npm run deploy:local
+Despliega el contrato en Monad Testnet:
+
+```powershell
+npm.cmd run deploy:monad-testnet
 ```
 
-Copia la dirección `PokerTable: 0x...` que imprime el despliegue y pégala en `client/.env`:
+Al completar el despliegue, el script actualiza automáticamente `VITE_POKER_CONTRACT_ADDRESS` y `VITE_RPC_URL` en `client/.env`, y `POKER_CONTRACT_ADDRESS` y `MONAD_RPC_URL` en `server/.env`. Reinicia Vite y el servidor Node después del despliegue; el servidor consulta Monad Testnet para verificar cada depósito. Cada partida debe usar un contrato nuevo, así que se requiere un nuevo despliegue para una nueva mesa/torneo. La cuenta administradora es el owner que despliega el contrato y será quien reciba la comisión y confirme los saldos finales.
 
-```env
-VITE_POKER_CONTRACT_ADDRESS=0xDIRECCION_DEL_CONTRATO
-VITE_RPC_URL=http://127.0.0.1:8545
-```
+Cada contrato fija la cantidad elegida en el primer `joinTable`; todos los participantes deben indicar la misma selección. El buy-in de demostración es `0.01 MON` por jugador y, después de confirmar el depósito, el servidor asigna exactamente `1000` fichas simuladas a esa billetera. El servidor valida el recibo, el contrato, el monto, el emisor y la cantidad de jugadores; no confía en una confirmación enviada solo por el navegador. En MetaMask selecciona o agrega Monad Testnet (RPC `https://testnet-rpc.monad.xyz`, Chain ID `10143`, símbolo `MON`). No uses `localhost`, `127.0.0.1` ni una dirección de despliegue Hardhat con esta red.
 
-Después de actualizar el contrato, vuelve a ejecutar `npm run compile` y `npm run deploy:local`, y reemplaza la dirección anterior por la nueva en `client/.env`. Cada contrato fija la cantidad elegida en el primer `joinTable`; todos los participantes deben enviar la misma selección. El buy-in es moneda nativa de la red (0.01 MON en una red configurada con MON); la etiqueta MON no convierte la moneda de otras redes.
+Mientras la sala está esperando jugadores, cada participante pagado puede usar **SALIR DE LA SALA Y REEMBOLSAR 0.01 MON**. MetaMask ejecuta `leaveTableAndRefund()` y devuelve el buy-in completo a la wallet que pagó; el servidor solo libera el asiento después de verificar el recibo y el evento `PlayerRefunded`. El host inicia la partida bloqueando primero el contrato en Monad con `lockGame()`. Desde ese momento no se permiten reembolsos. Esta lógica requiere desplegar la versión nueva de `PokerTable`; los contratos desplegados anteriormente no tienen estas funciones y no pueden procesar reembolsos con este flujo.
 
-Crea el archivo `client/.env` (Vite solo expone variables con prefijo `VITE_`). En MetaMask agrega la red local:
-- RPC: `http://127.0.0.1:8545`
-- Chain ID: `31337`
-- Símbolo de moneda: MON
+Cuando todos hayan pagado y la última mano haya terminado, el host elige **CERRAR PARTIDA Y HABILITAR RETIROS**. El owner del contrato conecta esa wallet, consulta la misma mesa y confirma los saldos finales en MetaMask. Si el owner no jugó, conecta la wallet administradora, escribe el ID de la mesa y pulsa **Consultar retiros de esta mesa**. El contrato reparte el 85% de los buy-ins custodiados en proporción al saldo de fichas; el 15% y el residuo de redondeo quedan para el owner. Después cada jugador conecta la wallet con que pagó y elige **RETIRAR ... MON A MI WALLET**. El retiro y la comisión requieren gas de testnet. Hacer `FOLD` solo retira al jugador de esa mano; no cancela el buy-in ni habilita un pago anticipado. La distribución cerrada se guarda en `server/data/settlements.json` para poder recuperarla si Node se reinicia.
 
-Importa una cuenta de prueba de Hardhat solo en un entorno local desechable. El MON del entorno local es moneda de prueba; nunca uses claves de prueba en una red real.
+Para seguir usando Hardhat local como alternativa, ejecuta `npm.cmd run node` y `npm.cmd run deploy:local`; la dirección local no es la dirección del contrato en Monad Testnet.
 
 ## Ejecutar aplicación
 
@@ -95,7 +92,7 @@ Terminal 4:
 npm run client
 ```
 
-Abre `http://localhost:5173`. Antes de entrar, elige un nombre (hasta 20 caracteres) y 2, 3 o 4 jugadores. El primer jugador que crea/ocupa la sala es el host; solo él puede cambiar su capacidad, iniciar una partida, continuar con **NUEVA MANO** o abrir **NUEVA PARTIDA**. Los demás deben seleccionar la capacidad definida por el host y pueden unirse a los asientos libres. En la mesa se muestra el nombre elegido; la billetera se conserva como identificador interno. Las acciones de póker siguen disponibles para cada participante cuando es su turno.
+Abre `http://localhost:5173`. Conecta la billetera de prueba de cada jugador, elige un nombre (hasta 20 caracteres) y 2, 3 o 4 jugadores. Al entrar, MetaMask pide firmar un mensaje de autenticación gratuito y confirmar el buy-in de `0.01 MON`; una vez verificado el depósito, se acreditan `1000` fichas. El servidor utiliza la dirección firmante como identidad. El host on-chain —la wallet que hizo el primer depósito efectivo— puede iniciar la partida, continuar con **NUEVA MANO** o cerrar la partida para los retiros; antes de iniciar, cada jugador puede salir y recibir su reembolso. En la mesa se muestra el nombre elegido y el saldo de fichas. Las acciones de póker siguen disponibles para cada participante cuando es su turno.
 
 ### Permitir conexiones desde otros equipos de la misma red
 
@@ -103,16 +100,17 @@ Abre `http://localhost:5173`. Antes de entrar, elige un nombre (hasta 20 caracte
 2. Inicia el servidor:
 
    ```powershell
+   $env:HOST = "0.0.0.0"
    npm.cmd run server
    ```
 
-   El servidor acepta por defecto conexiones web desde IP privadas de la red local. Solo necesitas `CLIENT_ORIGINS` para permitir un origen específico adicional.
+   `0.0.0.0` hace que Node escuche en todas las interfaces de red; no es la IP que se comparte. Si quieres escuchar solo en una interfaz, reemplázalo por la IPv4 concreta (por ejemplo, `$env:HOST = "192.168.1.50"`). El servidor acepta por defecto conexiones web desde IP privadas de la red local. Solo necesitas `CLIENT_ORIGINS` para permitir un origen específico adicional.
 3. Inicia el cliente con `npm.cmd run client`. Si Windows pregunta, permite Node.js en redes privadas. Si no aparece el aviso, habilita el acceso privado para Node.js o permite los puertos TCP `5173` y `3001` en el Firewall de Windows.
 4. Comparte `http://192.168.1.50:5173` con los demás jugadores. Ellos deben abrir esa dirección, conectar su billetera y entrar al mismo ID de mesa. El navegador usará automáticamente el servidor del mismo equipo en el puerto `3001`.
 
-Reemplaza la IP de ejemplo por la IPv4 real del PC servidor. Si la IP cambia, comparte la nueva dirección. Para usar un servidor de juego en otra dirección, define `VITE_GAME_SERVER_URL` en `client/.env` (por ejemplo, `http://192.168.1.50:3001`) y reinicia Vite.
+Reemplaza la IP de ejemplo por la IPv4 real del PC servidor. Si la IP cambia, comparte la nueva dirección. Si la página y el servidor de juego están en equipos distintos, define `VITE_GAME_SERVER_URL` en `client/.env` con la IPv4 del equipo que corre Node (por ejemplo, `VITE_GAME_SERVER_URL=http://192.168.1.50:3001`) y reinicia Vite. Si ambos corren en el mismo PC y abres la página con su IP, no necesitas definir esta variable: el cliente usa automáticamente el hostname de la página.
 
-Esta configuración es para una red local de confianza. No abras estos puertos a Internet ni configures redirección de puertos en el router: el servidor aún no autentica billeteras y las fichas son simuladas.
+No abras estos puertos a Internet ni configures redirección de puertos en el router. Aunque el servidor verifica los buy-ins en la blockchain, las partidas y las fichas se gestionan en memoria y no son un token transferible ni una garantía de pago. El contrato actual tampoco liquida automáticamente el saldo de fichas al ganador.
 
 ## Flujo Git para cuatro integrantes
 

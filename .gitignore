@@ -3,4 +3,9 @@ artifacts/
 cache/
 coverage/
 client/dist/
+.env
+client/.env
+server/.env
+server/data/settlements.json
+server/data/settlements.json.tmp
 .DS_Store

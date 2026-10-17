@@ -31,6 +31,18 @@ test("starts hands with two or three players", () => {
   }
 });
 
+test("uses each verified buy-in chip balance instead of minting a fresh stack", () => {
+  const game = createGame([
+    { wallet: wallets[0], stack: 1500 },
+    { wallet: wallets[1], stack: 750 }
+  ]);
+
+  assert.equal(
+    game.players.reduce((total, player) => total + player.stack, game.pot),
+    2250
+  );
+});
+
 test("checks turn order, betting rules, and advances to the flop", () => {
   const game = createGame(wallets);
 
