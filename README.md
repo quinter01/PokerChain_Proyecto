@@ -1,17 +1,24 @@
 # PokerChain — prototipo académico
 
-Prototipo de póker híbrido para cuatro jugadores: React + ethers.js, servidor Node.js/Socket.IO y contrato Solidity desplegable con Hardhat.
+Prototipo de póker híbrido para dos a cuatro jugadores: React + ethers.js, servidor Node.js/Socket.IO y contrato Solidity desplegable con Hardhat.
 
 ## Alcance actual
 
-- Contrato de depósito de buy-in fijo para cuatro direcciones y liquidación del bote a una dirección ganadora.
+- Contrato con buy-in fijo y selección de mesa para 2, 3 o 4 jugadores; la primera entrada fija la capacidad y la liquidación requiere completar esos asientos.
 - Interfaz React básica para conectar MetaMask, solicitar entrada a una sala y enviar el buy-in.
-- Servidor Socket.IO para estado de sala y eventos de acciones de demostración.
+- Servidor Socket.IO con partidas locales de Texas Hold'em configurables para dos, tres o cuatro jugadores: turnos, rondas de apuestas, manos privadas y evaluación del ganador.
 - Pruebas de contrato con Hardhat.
 
 ## Importante: no es apto para dinero real
 
-La lógica de juego, evaluación de manos, turnos, control de apuestas, aleatoriedad verificable y resolución de disputas NO están implementados. El contrato `settle(winner)` acepta el ganador indicado por quien llama: sirve para demostrar el flujo, pero no garantiza que el resultado sea correcto. No conectes fondos reales ni despliegues en mainnet. Antes de producción hacen falta auditoría, reglas completas, sistema seguro de reembolsos, mecanismo de consenso/atestación de resultados, protección contra desconexiones y revisión legal.
+La partida del servidor es una simulación local: cada jugador comienza con 1000 fichas, las ciegas son 10/20 y las cartas se reparten con aleatoriedad del servidor, no verificable por blockchain. Las fichas no representan MON ni están sincronizadas con el contrato. El contrato `settle(winner)` acepta el ganador indicado por quien llama y no garantiza que el resultado sea correcto. No conectes fondos reales ni despliegues en mainnet. Antes de producción hacen falta auditoría, aleatoriedad verificable, resolución de disputas, protección contra desconexiones y revisión legal.
+
+### Condiciones de victoria
+
+- Un jugador gana la mano inmediatamente si todos los demás se retiran (`fold`); recibe el bote sin revelar las cartas.
+- Si quedan varios jugadores al final del river, gana quien tenga la mejor mano de cinco cartas entre sus dos cartas privadas y las cinco comunitarias.
+- Las manos se ordenan de mayor a menor: escalera de color, póker, full house, color, escalera, trío, doble pareja, pareja y carta alta. Los desempates comparan rangos y kickers; si la mejor mano empata, los jugadores comparten el bote.
+- Al terminar, la mesa anuncia al ganador y su mano, o indica que los demás se retiraron. Es una simulación del servidor, no un resultado verificable por blockchain.
 
 ## Requisitos
 
@@ -59,12 +66,14 @@ VITE_POKER_CONTRACT_ADDRESS=0xDIRECCION_DEL_CONTRATO
 VITE_RPC_URL=http://127.0.0.1:8545
 ```
 
+Después de actualizar el contrato, vuelve a ejecutar `npm run compile` y `npm run deploy:local`, y reemplaza la dirección anterior por la nueva en `client/.env`. Cada contrato fija la cantidad elegida en el primer `joinTable`; todos los participantes deben enviar la misma selección. El buy-in es moneda nativa de la red (0.01 MON en una red configurada con MON); la etiqueta MON no convierte la moneda de otras redes.
+
 Crea el archivo `client/.env` (Vite solo expone variables con prefijo `VITE_`). En MetaMask agrega la red local:
 - RPC: `http://127.0.0.1:8545`
 - Chain ID: `31337`
-- Moneda: ETH
+- Símbolo de moneda: MON
 
-Importa una cuenta de prueba de Hardhat solo en un entorno local desechable. Nunca uses claves de prueba en una red real.
+Importa una cuenta de prueba de Hardhat solo en un entorno local desechable. El MON del entorno local es moneda de prueba; nunca uses claves de prueba en una red real.
 
 ## Ejecutar aplicación
 
@@ -74,13 +83,36 @@ Terminal 3:
 npm run server
 ```
 
+Para ejecutar las pruebas de la lógica de juego:
+
+```bash
+npm run test --workspace server
+```
+
 Terminal 4:
 
 ```bash
 npm run client
 ```
 
-Abre `http://localhost:5173`.
+Abre `http://localhost:5173`. Antes de entrar, elige 2, 3 o 4 jugadores. La selección del primer jugador configura la mesa; los demás deben seleccionar la misma cantidad para unirse. Cuando se ocupen todos los asientos, uno de los jugadores conectados puede pulsar **INICIAR PARTIDA**.
+
+### Permitir conexiones desde otros equipos de la misma red
+
+1. En el PC que ejecuta el proyecto, averigua su dirección IPv4 con `ipconfig` (por ejemplo, `192.168.1.50`). Los dispositivos deben estar conectados a la misma red local.
+2. Inicia el servidor:
+
+   ```powershell
+   npm.cmd run server
+   ```
+
+   El servidor acepta por defecto conexiones web desde IP privadas de la red local. Solo necesitas `CLIENT_ORIGINS` para permitir un origen específico adicional.
+3. Inicia el cliente con `npm.cmd run client`. Si Windows pregunta, permite Node.js en redes privadas. Si no aparece el aviso, habilita el acceso privado para Node.js o permite los puertos TCP `5173` y `3001` en el Firewall de Windows.
+4. Comparte `http://192.168.1.50:5173` con los demás jugadores. Ellos deben abrir esa dirección, conectar su billetera y entrar al mismo ID de mesa. El navegador usará automáticamente el servidor del mismo equipo en el puerto `3001`.
+
+Reemplaza la IP de ejemplo por la IPv4 real del PC servidor. Si la IP cambia, comparte la nueva dirección. Para usar un servidor de juego en otra dirección, define `VITE_GAME_SERVER_URL` en `client/.env` (por ejemplo, `http://192.168.1.50:3001`) y reinicia Vite.
+
+Esta configuración es para una red local de confianza. No abras estos puertos a Internet ni configures redirección de puertos en el router: el servidor aún no autentica billeteras y las fichas son simuladas.
 
 ## Flujo Git para cuatro integrantes
 
@@ -130,7 +162,7 @@ client/src/style.css
 ## Próximos pasos
 
 1. Implementar un único socket compartido en el frontend y validar identidad de billetera.
-2. Implementar reglas de Texas Hold'em, turnos, stacks y evaluación de manos con pruebas.
+2. Sustituir la lógica local de Texas Hold'em por un mecanismo verificable y vincular su resultado de forma segura al contrato.
 3. Diseñar un mecanismo verificable para barajar/repartir cartas privadas; Chainlink VRF por sí solo no resuelve la privacidad de cartas.
 4. Sustituir la liquidación controlada por un mecanismo de resultado firmado/consensuado con disputas.
 5. Implementar reembolsos seguros y auditar el contrato antes de cualquier uso con valor real.

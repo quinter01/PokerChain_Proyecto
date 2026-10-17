@@ -8,7 +8,7 @@ async function main() {
   await table.waitForDeployment();
   console.log("Deployer:", deployer.address);
   console.log("PokerTable:", await table.getAddress());
-  console.log("Buy-in (ETH):", ethers.formatEther(buyIn));
+  console.log("Buy-in (MON):", ethers.formatEther(buyIn));
 }
 
 main().catch((error) => {

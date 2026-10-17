@@ -2,68 +2,189 @@ import express from "express";
 import cors from "cors";
 import { createServer } from "node:http";
 import { Server } from "socket.io";
+import {
+  applyAction,
+  createGame,
+  getPrivateState,
+  getPublicState,
+  startNextHand
+} from "./pokerGame.js";
+import { isAllowedClientOrigin } from "./clientOrigins.js";
 
 const app = express();
-app.use(cors({ origin: "http://localhost:5173" }));
+const configuredOrigins = (process.env.CLIENT_ORIGINS ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const corsOrigin = (origin, callback) => {
+  callback(null, isAllowedClientOrigin(origin, configuredOrigins));
+};
+app.use(cors({ origin: corsOrigin }));
 app.get("/health", (_req, res) => res.json({ ok: true, service: "poker-server" }));
 
 const httpServer = createServer(app);
-const io = new Server(httpServer, { cors: { origin: "http://localhost:5173" } });
+const io = new Server(httpServer, { cors: { origin: corsOrigin } });
 const rooms = new Map();
+const games = new Map();
+const tableSettings = new Map();
+
+function emitTableState(tableId, room) {
+  io.to(tableId).emit("table:state", {
+    tableId,
+    players: [...room.values()].map((player) => player.walletAddress),
+    seatsTaken: room.size,
+    maxPlayers: tableSettings.get(tableId) ?? 4,
+    started: games.has(tableId)
+  });
+}
+
+function emitGameState(tableId, game, room) {
+  io.to(tableId).emit("game:state", getPublicState(game));
+  for (const player of room.values()) {
+    const privateState = getPrivateState(game, player.walletAddress);
+    if (privateState) io.to(player.socketId).emit("game:private", privateState);
+  }
+}
 
 io.on("connection", (socket) => {
-  socket.emit("server:message", { text: "Conectado al servidor. Esta es una sala demo." });
+  socket.data.tableIds = new Set();
+  socket.emit("server:message", { text: "Conectado al servidor de Texas Hold'em." });
 
-  socket.on("table:join", ({ tableId, walletAddress }) => {
-    if (!tableId || !walletAddress) {
+  socket.on("table:join", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const walletAddress = String(payload?.walletAddress ?? "").trim();
+    const requestedPlayerCount = Number(payload?.maxPlayers);
+    if (!tableId || !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
       socket.emit("game:error", { message: "Se requiere tableId y walletAddress." });
       return;
     }
-    const roomName = String(tableId);
-    const room = rooms.get(roomName) ?? new Map();
-    if (room.size >= 4 && !room.has(socket.id)) {
-      socket.emit("game:error", { message: "La mesa ya tiene cuatro conexiones." });
+    if (!Number.isInteger(requestedPlayerCount) || requestedPlayerCount < 2 || requestedPlayerCount > 4) {
+      socket.emit("game:error", { message: "Elige una mesa de 2, 3 o 4 jugadores." });
       return;
     }
-    room.set(socket.id, { walletAddress, socketId: socket.id });
-    rooms.set(roomName, room);
-    socket.join(roomName);
-    io.to(roomName).emit("table:state", {
-      tableId: roomName,
-      players: [...room.values()].map((p) => p.walletAddress),
-      seatsTaken: room.size,
-      maxPlayers: 4
-    });
+    const room = rooms.get(tableId) ?? new Map();
+    const wallet = walletAddress.toLowerCase();
+    const activeGame = games.get(tableId);
+    if (activeGame && !activeGame.players.some((player) => player.wallet === wallet)) {
+      socket.emit("game:error", {
+        message: "La partida ya inició; solo pueden volver a conectarse los jugadores de esta mano."
+      });
+      return;
+    }
+    const configuredPlayerCount = tableSettings.get(tableId);
+    if (configuredPlayerCount !== undefined && configuredPlayerCount !== requestedPlayerCount) {
+      socket.emit("game:error", {
+        message: `Esta mesa está configurada para ${configuredPlayerCount} jugadores. Selecciona esa cantidad.`
+      });
+      return;
+    }
+    const maxPlayers = configuredPlayerCount ?? requestedPlayerCount;
+    if (room.size >= maxPlayers && !room.has(wallet)) {
+      socket.emit("game:error", { message: `La mesa ya tiene ${maxPlayers} jugadores.` });
+      return;
+    }
+    tableSettings.set(tableId, maxPlayers);
+    room.set(wallet, { walletAddress, socketId: socket.id });
+    rooms.set(tableId, room);
+    socket.data.tableIds.add(tableId);
+    socket.join(tableId);
+    emitTableState(tableId, room);
+
+    const game = games.get(tableId);
+    if (game) emitGameState(tableId, game, room);
   });
 
-  // Demo event only. Validate turn order, stack sizes, legal actions and
-  // signed on-chain settlement in a real game before accepting wagers.
-  socket.on("game:action", ({ tableId, action }) => {
-    if (!tableId || !["fold", "check", "call", "raise"].includes(action?.type)) {
-      socket.emit("game:error", { message: "Acción no válida." });
+  socket.on("game:start", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const room = rooms.get(tableId);
+    const member = room && [...room.values()].find((player) => player.socketId === socket.id);
+    if (!member) {
+      socket.emit("game:error", { message: "Debes ocupar un asiento para iniciar la partida." });
       return;
     }
-    io.to(String(tableId)).emit("game:action", {
-      player: socket.id,
-      action,
-      note: "Evento de demostración: aún no valida reglas ni apuestas."
-    });
+    if (games.has(tableId)) {
+      socket.emit("game:error", { message: "La partida ya fue iniciada." });
+      return;
+    }
+    const maxPlayers = tableSettings.get(tableId);
+    if (!maxPlayers || room.size !== maxPlayers) {
+      socket.emit("game:error", {
+        message: `Se necesitan ${maxPlayers ?? "los"} jugadores para iniciar la partida.`
+      });
+      return;
+    }
+
+    try {
+      const game = createGame([...room.keys()]);
+      games.set(tableId, game);
+      emitTableState(tableId, room);
+      emitGameState(tableId, game, room);
+    } catch (error) {
+      socket.emit("game:error", { message: error.message });
+    }
+  });
+
+  socket.on("game:action", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const room = rooms.get(tableId);
+    const member = room && [...room.values()].find((player) => player.socketId === socket.id);
+    const game = games.get(tableId);
+    if (!member || !game) {
+      socket.emit("game:error", { message: "Debes ocupar un asiento en una partida activa." });
+      return;
+    }
+    try {
+      applyAction(game, member.walletAddress, payload.action);
+      io.to(tableId).emit("game:action", {
+        player: member.walletAddress,
+        action: payload.action
+      });
+      emitGameState(tableId, game, room);
+    } catch (error) {
+      socket.emit("game:error", { message: error.message });
+    }
+  });
+
+  socket.on("game:nextHand", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const room = rooms.get(tableId);
+    const member = room && [...room.values()].find((player) => player.socketId === socket.id);
+    const game = games.get(tableId);
+    if (!member || !game) {
+      socket.emit("game:error", { message: "Debes ocupar un asiento en esta mesa." });
+      return;
+    }
+    try {
+      const nextGame = startNextHand(game);
+      games.set(tableId, nextGame);
+      emitGameState(tableId, nextGame, room);
+    } catch (error) {
+      socket.emit("game:error", { message: error.message });
+    }
   });
 
   socket.on("disconnect", () => {
-    for (const [tableId, room] of rooms.entries()) {
-      if (room.delete(socket.id)) {
-        io.to(tableId).emit("table:state", {
-          tableId,
-          players: [...room.values()].map((p) => p.walletAddress),
-          seatsTaken: room.size,
-          maxPlayers: 4
+    for (const tableId of socket.data.tableIds) {
+      const room = rooms.get(tableId);
+      if (!room) continue;
+      const wallet = [...room.entries()]
+        .find(([, player]) => player.socketId === socket.id)?.[0];
+      if (wallet) room.delete(wallet);
+      emitTableState(tableId, room);
+      if (room.size === 0) {
+        rooms.delete(tableId);
+        games.delete(tableId);
+        tableSettings.delete(tableId);
+      } else if (games.has(tableId)) {
+        io.to(tableId).emit("game:error", {
+          message: "Un jugador se desconectó. Esta mano queda pausada."
         });
-        if (room.size === 0) rooms.delete(tableId);
       }
     }
   });
 });
 
 const port = process.env.PORT || 3001;
-httpServer.listen(port, () => console.log(`Poker server escuchando en http://localhost:${port}`));
+httpServer.listen(port, "0.0.0.0", () =>
+  console.log(`Poker server escuchando en http://0.0.0.0:${port}`)
+);
