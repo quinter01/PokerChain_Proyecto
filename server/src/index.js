@@ -10,6 +10,8 @@ import {
   startNextHand
 } from "./pokerGame.js";
 import { isAllowedClientOrigin } from "./clientOrigins.js";
+import { normalizePlayerName } from "./playerName.js";
+import { isTableHost } from "./tablePermissions.js";
 
 const app = express();
 const configuredOrigins = (process.env.CLIENT_ORIGINS ?? "")
@@ -27,14 +29,20 @@ const io = new Server(httpServer, { cors: { origin: corsOrigin } });
 const rooms = new Map();
 const games = new Map();
 const tableSettings = new Map();
+const tableHosts = new Map();
 
 function emitTableState(tableId, room) {
   io.to(tableId).emit("table:state", {
     tableId,
-    players: [...room.values()].map((player) => player.walletAddress),
+    players: [...room.values()].map(({ walletAddress, playerName }) => ({
+      walletAddress,
+      playerName
+    })),
     seatsTaken: room.size,
     maxPlayers: tableSettings.get(tableId) ?? 4,
-    started: games.has(tableId)
+    configured: tableSettings.has(tableId),
+    started: games.has(tableId),
+    hostAddress: tableHosts.get(tableId) ?? null
   });
 }
 
@@ -54,6 +62,13 @@ io.on("connection", (socket) => {
     const tableId = String(payload?.tableId ?? "").trim();
     const walletAddress = String(payload?.walletAddress ?? "").trim();
     const requestedPlayerCount = Number(payload?.maxPlayers);
+    let playerName;
+    try {
+      playerName = normalizePlayerName(payload?.playerName);
+    } catch (error) {
+      socket.emit("game:error", { message: error.message });
+      return;
+    }
     if (!tableId || !/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
       socket.emit("game:error", { message: "Se requiere tableId y walletAddress." });
       return;
@@ -83,8 +98,9 @@ io.on("connection", (socket) => {
       socket.emit("game:error", { message: `La mesa ya tiene ${maxPlayers} jugadores.` });
       return;
     }
+    if (!tableHosts.has(tableId)) tableHosts.set(tableId, wallet);
     tableSettings.set(tableId, maxPlayers);
-    room.set(wallet, { walletAddress, socketId: socket.id });
+    room.set(wallet, { walletAddress, playerName, socketId: socket.id });
     rooms.set(tableId, room);
     socket.data.tableIds.add(tableId);
     socket.join(tableId);
@@ -94,12 +110,48 @@ io.on("connection", (socket) => {
     if (game) emitGameState(tableId, game, room);
   });
 
+  socket.on("table:configure", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const requestedPlayerCount = Number(payload?.maxPlayers);
+    const room = rooms.get(tableId);
+    const member = room && [...room.values()].find((player) => player.socketId === socket.id);
+    if (!member) {
+      socket.emit("game:error", { message: "Debes estar en la sala para cambiar su capacidad." });
+      return;
+    }
+    if (!isTableHost(tableHosts.get(tableId), member.walletAddress)) {
+      socket.emit("game:error", { message: "Solo el host puede cambiar la capacidad de la sala." });
+      return;
+    }
+    if (games.has(tableId)) {
+      socket.emit("game:error", { message: "No puedes cambiar la capacidad durante una partida." });
+      return;
+    }
+    if (!Number.isInteger(requestedPlayerCount) || requestedPlayerCount < 2 || requestedPlayerCount > 4) {
+      socket.emit("game:error", { message: "Elige una mesa de 2, 3 o 4 jugadores." });
+      return;
+    }
+    if (requestedPlayerCount < room.size) {
+      socket.emit("game:error", {
+        message: `No puedes configurar ${requestedPlayerCount} asientos: ya hay ${room.size} jugadores en la sala.`
+      });
+      return;
+    }
+
+    tableSettings.set(tableId, requestedPlayerCount);
+    emitTableState(tableId, room);
+  });
+
   socket.on("game:start", (payload) => {
     const tableId = String(payload?.tableId ?? "").trim();
     const room = rooms.get(tableId);
     const member = room && [...room.values()].find((player) => player.socketId === socket.id);
     if (!member) {
       socket.emit("game:error", { message: "Debes ocupar un asiento para iniciar la partida." });
+      return;
+    }
+    if (!isTableHost(tableHosts.get(tableId), member.walletAddress)) {
+      socket.emit("game:error", { message: "Solo el host puede iniciar la partida." });
       return;
     }
     if (games.has(tableId)) {
@@ -154,6 +206,10 @@ io.on("connection", (socket) => {
       socket.emit("game:error", { message: "Debes ocupar un asiento en esta mesa." });
       return;
     }
+    if (!isTableHost(tableHosts.get(tableId), member.walletAddress)) {
+      socket.emit("game:error", { message: "Solo el host puede iniciar una nueva mano." });
+      return;
+    }
     try {
       const nextGame = startNextHand(game);
       games.set(tableId, nextGame);
@@ -161,6 +217,29 @@ io.on("connection", (socket) => {
     } catch (error) {
       socket.emit("game:error", { message: error.message });
     }
+  });
+
+  socket.on("game:resetLobby", (payload) => {
+    const tableId = String(payload?.tableId ?? "").trim();
+    const room = rooms.get(tableId);
+    const member = room && [...room.values()].find((player) => player.socketId === socket.id);
+    const game = games.get(tableId);
+    if (!member || !game) {
+      socket.emit("game:error", { message: "Debes estar en una partida terminada para abrir una nueva sala." });
+      return;
+    }
+    if (!isTableHost(tableHosts.get(tableId), member.walletAddress)) {
+      socket.emit("game:error", { message: "Solo el host puede iniciar una nueva partida." });
+      return;
+    }
+    if (game.phase !== "complete") {
+      socket.emit("game:error", { message: "Termina la mano actual antes de iniciar una nueva partida." });
+      return;
+    }
+
+    games.delete(tableId);
+    tableSettings.delete(tableId);
+    emitTableState(tableId, room);
   });
 
   socket.on("disconnect", () => {
@@ -175,6 +254,7 @@ io.on("connection", (socket) => {
         rooms.delete(tableId);
         games.delete(tableId);
         tableSettings.delete(tableId);
+        tableHosts.delete(tableId);
       } else if (games.has(tableId)) {
         io.to(tableId).emit("game:error", {
           message: "Un jugador se desconectó. Esta mano queda pausada."

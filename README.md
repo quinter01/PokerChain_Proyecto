@@ -5,7 +5,7 @@ Prototipo de póker híbrido para dos a cuatro jugadores: React + ethers.js, ser
 ## Alcance actual
 
 - Contrato con buy-in fijo y selección de mesa para 2, 3 o 4 jugadores; la primera entrada fija la capacidad y la liquidación requiere completar esos asientos.
-- Interfaz React básica para conectar MetaMask, solicitar entrada a una sala y enviar el buy-in.
+- Interfaz React para conectar MetaMask, elegir nombre de jugador, entrar a una sala y enviar el buy-in.
 - Servidor Socket.IO con partidas locales de Texas Hold'em configurables para dos, tres o cuatro jugadores: turnos, rondas de apuestas, manos privadas y evaluación del ganador.
 - Pruebas de contrato con Hardhat.
 
@@ -95,7 +95,7 @@ Terminal 4:
 npm run client
 ```
 
-Abre `http://localhost:5173`. Antes de entrar, elige 2, 3 o 4 jugadores. La selección del primer jugador configura la mesa; los demás deben seleccionar la misma cantidad para unirse. Cuando se ocupen todos los asientos, uno de los jugadores conectados puede pulsar **INICIAR PARTIDA**.
+Abre `http://localhost:5173`. Antes de entrar, elige un nombre (hasta 20 caracteres) y 2, 3 o 4 jugadores. El primer jugador que crea/ocupa la sala es el host; solo él puede cambiar su capacidad, iniciar una partida, continuar con **NUEVA MANO** o abrir **NUEVA PARTIDA**. Los demás deben seleccionar la capacidad definida por el host y pueden unirse a los asientos libres. En la mesa se muestra el nombre elegido; la billetera se conserva como identificador interno. Las acciones de póker siguen disponibles para cada participante cuando es su turno.
 
 ### Permitir conexiones desde otros equipos de la misma red
 
